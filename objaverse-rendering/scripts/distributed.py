@@ -13,6 +13,8 @@ import tyro
 import wandb
 import math
 
+blender_path = " ~/workspace/computer_vision/home/hj453/code/blender_download/Blender_rendering/software/blender-3.2.2-linux-x64/blender"
+
 
 @dataclass
 class Args:
@@ -32,6 +34,26 @@ class Args:
     """number of gpus to use. -1 means all available gpus"""
 
 
+def run_render(item: str):
+    view_path = os.path.join(".objaverse/hf-objaverse-v1/views_whole_sphere", item.split("/")[-1][:-4])
+    print(view_path)
+    if os.path.exists(view_path):
+        print("========", item, "rendered", "========")
+    else:
+        os.makedirs(view_path, exist_ok=True)
+
+    # Perform some operation on the item
+    print(item)
+    command = (
+        # f"export DISPLAY=:0.{gpu} &&"
+        # f" GOMP_CPU_AFFINITY='0-47' OMP_NUM_THREADS=48 OMP_SCHEDULE=STATIC OMP_PROC_BIND=CLOSE "
+        # f" CUDA_VISIBLE_DEVICES={gpu} "
+        f" {blender_path} -b -P scripts/blender_script.py --python-use-system-env -- --object_path /home/sytan98/{item} --num_images 1"
+    )
+    print(command)
+    subprocess.run(command, shell=True)
+
+
 def worker(
     queue: multiprocessing.JoinableQueue,
     count: multiprocessing.Value,
@@ -43,22 +65,21 @@ def worker(
         if item is None:
             break
 
-        view_path = os.path.join('.objaverse/hf-objaverse-v1/views_whole_sphere', item.split('/')[-1][:-4])
+        view_path = os.path.join(".objaverse/hf-objaverse-v1/views_whole_sphere", item.split("/")[-1][:-4])
         if os.path.exists(view_path):
             queue.task_done()
-            print('========', item, 'rendered', '========')
+            print("========", item, "rendered", "========")
             continue
         else:
-            os.makedirs(view_path, exist_ok = True)
+            os.makedirs(view_path, exist_ok=True)
 
         # Perform some operation on the item
         print(item, gpu)
         command = (
             # f"export DISPLAY=:0.{gpu} &&"
             # f" GOMP_CPU_AFFINITY='0-47' OMP_NUM_THREADS=48 OMP_SCHEDULE=STATIC OMP_PROC_BIND=CLOSE "
-            f" CUDA_VISIBLE_DEVICES={gpu} "
-            f" blender-3.2.2-linux-x64/blender -b -P scripts/blender_script.py --"
-            f" --object_path {item}"
+            # f" CUDA_VISIBLE_DEVICES={gpu} "
+            f" {blender_path} -b -P scripts/blender_script.py --python-use-system-env -- --object_path /home/sytan98/{item} --num_images 1"
         )
         print(command)
         subprocess.run(command, shell=True)
@@ -83,9 +104,7 @@ if __name__ == "__main__":
     for gpu_i in range(args.num_gpus):
         for worker_i in range(args.workers_per_gpu):
             worker_i = gpu_i * args.workers_per_gpu + worker_i
-            process = multiprocessing.Process(
-                target=worker, args=(queue, count, gpu_i, s3)
-            )
+            process = multiprocessing.Process(target=worker, args=(queue, count, gpu_i, s3))
             process.daemon = True
             process.start()
 
@@ -93,10 +112,11 @@ if __name__ == "__main__":
     with open(args.input_models_path, "r") as f:
         model_paths = json.load(f)
 
-    model_keys = list(model_paths.keys())
+    model_path_length = 10
+    model_keys = list(model_paths.keys())[:model_path_length]
 
     for item in model_keys:
-        queue.put(os.path.join('.objaverse/hf-objaverse-v1', model_paths[item]))
+        queue.put(os.path.join(".objaverse/hf-objaverse-v1", model_paths[item]))
 
     # update the wandb count
     if args.log_to_wandb:
@@ -105,11 +125,11 @@ if __name__ == "__main__":
             wandb.log(
                 {
                     "count": count.value,
-                    "total": len(model_paths),
-                    "progress": count.value / len(model_paths),
+                    "total": model_path_length,
+                    "progress": count.value / model_path_length,
                 }
             )
-            if count.value == len(model_paths):
+            if count.value == model_path_length:
                 break
 
     # Wait for all tasks to be completed

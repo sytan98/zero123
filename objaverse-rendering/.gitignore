@@ -3,6 +3,7 @@ wandb
 views
 tmp
 progress
+.objaverse
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
