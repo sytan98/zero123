@@ -32,7 +32,6 @@ from mathutils import Vector, Matrix
 import numpy as np
 
 import bpy
-from mathutils import Vector
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -222,6 +221,19 @@ def reset_lighting() -> None:
     bpy.data.objects["Area"].location[2] = 0.5
 
 
+def reset_lighting_2():
+    # Remove existing lights, if any
+    objs = []
+    for o in bpy.data.objects:
+        if o.type == "LIGHT":
+            objs.append(o)
+        elif o.active_material is not None:
+            for node in o.active_material.node_tree.nodes:
+                if node.type == "EMISSION":
+                    objs.append(o)
+    bpy.ops.object.delete({"selected_objects": objs})
+
+
 def reset_scene() -> None:
     """Resets the scene to a clean state."""
     # delete everything that isn't part of a camera or a light
@@ -350,6 +362,7 @@ def save_images(object_file: str) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
 
     reset_scene()
+    reset_lighting()
 
     # load the object
     load_object(object_file)
@@ -396,7 +409,7 @@ def save_images(object_file: str) -> None:
         # Render relit ground truth
         for envmap_name in glob.glob(os.path.join(args.test_light_dir, "*.hdr"), recursive=True):
             envmap_path = envmap_name
-
+            reset_lighting_2()
             add_light_env(env=envmap_path, strength=1.0)
             for i in range(args.num_images):
                 # set camera
