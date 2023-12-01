@@ -16,12 +16,11 @@ Example usage:
 Here, input_model_paths.json is a json file containing a list of paths to .glb.
 """
 
+
 import argparse
-import glob
 import json
 import math
 import os
-from os.path import basename
 import random
 import sys
 import time
@@ -30,8 +29,9 @@ import uuid
 from typing import Tuple
 from mathutils import Vector, Matrix
 import numpy as np
-
+import glob
 import bpy
+from mathutils import Vector
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -43,7 +43,8 @@ parser.add_argument(
 parser.add_argument("--output_dir", type=str, default=".objaverse/hf-objaverse-v1/views_whole_sphere")
 parser.add_argument("--engine", type=str, default="CYCLES", choices=["CYCLES", "BLENDER_EEVEE"])
 parser.add_argument("--scale", type=float, default=0.8)
-parser.add_argument("--num_images", type=int, default=8)
+parser.add_argument("--num_images", type=int, default=16)
+parser.add_argument("--lighting_per_view", type=int, default=8)
 parser.add_argument("--camera_dist", type=int, default=1.2)
 parser.add_argument(
     "--test_light_dir",
@@ -160,18 +161,19 @@ def randomize_lighting() -> None:
     bpy.data.objects["Area"].location[2] = random.uniform(0.5, 1.5)
 
 
+# add environment map as the lighting condition
 def add_light_env(env=(1, 1, 1, 1), strength=1, rot_vec_rad=(0, 0, 0), scale=(1, 1, 1)):
-    r"""Adds environment lighting.
-
-    Args:
-        env (tuple(float) or str, optional): Environment map. If tuple,
-            it's RGB or RGBA, each element of which :math:`\in [0,1]`.
-            Otherwise, it's the path to an image.
-        strength (float, optional): Light intensity.
-        rot_vec_rad (tuple(float), optional): Rotations in radians around x,
-            y and z.
-        scale (tuple(float), optional): If all changed simultaneously,
-            then no effects.
+    """
+    Adds environment lighting.
+        Args:
+            env (tuple(float) or str, optional): Environment map. If tuple,
+                it's RGB or RGBA, each element of which :math:`\in [0,1]`.
+                Otherwise, it's the path to an image.
+            strength (float, optional): Light intensity.
+            rot_vec_rad (tuple(float), optional): Rotations in radians around x,
+                y and z.
+            scale (tuple(float), optional): If all changed simultaneously,
+                then no effects.
     """
 
     engine = bpy.context.scene.render.engine
@@ -179,7 +181,7 @@ def add_light_env(env=(1, 1, 1, 1), strength=1, rot_vec_rad=(0, 0, 0), scale=(1,
 
     if isinstance(env, str):
         bpy.data.images.load(env, check_existing=True)
-        env = bpy.data.images[basename(env)]
+        env = bpy.data.images[os.path.basename(env)]
     else:
         if len(env) == 3:
             env += (1,)
@@ -214,24 +216,138 @@ def add_light_env(env=(1, 1, 1, 1), strength=1, rot_vec_rad=(0, 0, 0), scale=(1,
     print("Environment light added")
 
 
-def reset_lighting() -> None:
-    light2.energy = 1000
-    bpy.data.objects["Area"].location[0] = 0
-    bpy.data.objects["Area"].location[1] = 0
-    bpy.data.objects["Area"].location[2] = 0.5
-
-
-def reset_lighting_2():
-    # Remove existing lights, if any
+def remove_unwanted_objects():
+    """
+    Remove unwanted objects from the scene, such as lights and background plane objects.
+    """
+    # Remove undesired objects and existing lights
     objs = []
     for o in bpy.data.objects:
-        if o.type == "LIGHT":
+        if o.name == "BackgroundPlane":
+            objs.append(o)
+        elif o.type == "LIGHT":
             objs.append(o)
         elif o.active_material is not None:
             for node in o.active_material.node_tree.nodes:
                 if node.type == "EMISSION":
                     objs.append(o)
+
     bpy.ops.object.delete({"selected_objects": objs})
+
+
+def has_materials() -> bool:
+    """Check if any object in the scene has materials."""
+    # material_set = set()
+    # for object in context.scene.objects:
+    #     for material in object.material_slots:
+    #         material_set.add(material)
+
+    # for material in material_set:
+    #     print(material.name)
+    for obj in bpy.context.scene.objects:
+        if obj.type == "MESH" and obj.data.materials:
+            return True
+    return False
+
+
+def has_high_quality_pbr_materials(obj):
+    # Iterate over the materials of the object
+    for material in obj.data.materials:
+        if material.use_nodes:
+            for node in material.node_tree.nodes:
+                # Check if the node is a Principled BSDF
+                if node.type == "BSDF_PRINCIPLED":
+                    # Check if the node has any links from texture nodes
+                    for link in material.node_tree.links:
+                        if link.to_node == node and link.from_node.type == "TEX_IMAGE":
+                            return True
+    return False
+
+
+def check_custom_filter(objs):
+    # Iterate over the materials of the object
+    for obj in objs:
+        for material in obj.data.materials:
+            if material.use_nodes:
+                for node in material.node_tree.nodes:
+                    # Check if the node is a Principled BSDF
+                    if node.type == "BSDF_PRINCIPLED":
+                        if node.inputs["Roughness"].default_value > 0.7:
+                            return False
+    return True
+
+
+def is_screen_like(obj, aspect_ratio_threshold=1.5, angle_threshold=0.1):
+    """
+    Check if the object is screen-like based on shape and orientation.
+    """
+    mesh = obj.data
+    # Check if the object is a mesh
+    if isinstance(mesh, bpy.types.Mesh):
+        # Check if the object has at least 3 vertices
+        if len(mesh.vertices) < 3:
+            return False
+
+        # Get the vertices of the object
+        vertices = [obj.matrix_world @ v.co for v in mesh.vertices]
+
+        # Check if the edges are approximately perpendicular
+        edges = [(vertices[i], vertices[(i + 1) % len(vertices)]) for i in range(len(vertices))]
+        angles = [
+            math.acos(
+                (e[0] - e[1]).normalized()
+                @ (edges[(j + 1) % len(vertices)][0] - edges[(j + 1) % len(vertices)][1]).normalized()
+            )
+            for j, e in enumerate(edges)
+        ]
+
+        # Check if the angles between edges are close to 90 degrees
+        if all(abs(angle - math.pi / 2) < angle_threshold for angle in angles):
+            # Check if the aspect ratio of the bounding box is within the threshold
+            bounding_box = obj.bound_box
+            x_size = max(bounding_box[i][0] for i in range(8)) - min(bounding_box[i][0] for i in range(8))
+            y_size = max(bounding_box[i][1] for i in range(8)) - min(bounding_box[i][1] for i in range(8))
+            aspect_ratio = max(x_size, y_size) / min(x_size, y_size)
+
+            if aspect_ratio < aspect_ratio_threshold:
+                return True
+
+    # Object is not screen-like
+    return False
+
+
+def is_flat(obj, threshold=0.001):
+    """
+    Check if the object's geometry is flat.
+    """
+    mesh = obj.data
+    # Check if the object is a mesh
+    if isinstance(mesh, bpy.types.Mesh):
+        # Iterate through each polygon in the mesh
+        for poly in mesh.polygons:
+            # Check if the polygon is not a quad
+            if len(poly.vertices) not in {3, 4}:
+                return False
+
+            # Calculate the normal of the polygon
+            normal = poly.normal.normalized()
+
+            # Check if the normal is almost vertical (up or down)
+            if abs(normal.z) > threshold or math.sqrt(normal.x**2 + normal.y**2) > threshold:
+                return False
+
+        # All polygons are flat, consider the object as flat
+        return True
+
+    # Object is not a mesh
+    return False
+
+
+def reset_lighting() -> None:
+    light2.energy = 1000
+    bpy.data.objects["Area"].location[0] = 0
+    bpy.data.objects["Area"].location[1] = 0
+    bpy.data.objects["Area"].location[2] = 0.5
 
 
 def reset_scene() -> None:
@@ -252,7 +368,7 @@ def reset_scene() -> None:
 
 
 # load the glb model
-def load_object(object_path: str) -> None:
+def load_object(object_path: str) -> list[any]:
     """Loads a glb model into the scene."""
     if object_path.endswith(".glb"):
         bpy.ops.import_scene.gltf(filepath=object_path, merge_vertices=True)
@@ -260,6 +376,9 @@ def load_object(object_path: str) -> None:
         bpy.ops.import_scene.fbx(filepath=object_path)
     else:
         raise ValueError(f"Unsupported file type: {object_path}")
+    mesh_objects = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+
+    return mesh_objects
 
 
 def scene_bbox(single_obj=None, ignore_matrix=False):
@@ -342,92 +461,85 @@ def normalize_scene():
     bpy.ops.object.select_all(action="DESELECT")
 
 
-def has_materials() -> bool:
-    """Check if any object in the scene has materials."""
-    # material_set = set()
-    # for object in context.scene.objects:
-    #     for material in object.material_slots:
-    #         material_set.add(material)
-
-    # for material in material_set:
-    #     print(material.name)
-    for obj in bpy.context.scene.objects:
-        if obj.type == "MESH" and obj.data.materials:
-            return True
-    return False
-
-
 def save_images(object_file: str) -> None:
     """Saves rendered images of the object in the scene."""
-    os.makedirs(args.output_dir, exist_ok=True)
 
     reset_scene()
-    reset_lighting()
 
     # load the object
-    load_object(object_file)
+    meshes = load_object(object_file)
     object_uid = os.path.basename(object_file).split(".")[0]
-    normalize_scene()
 
-    # Ignore object if object has no material
-    if not has_materials():
+    # skip the loaded object if it has no material
+    print("===" * 20)
+    print(object_uid)
+    # Iterate through all objects in the scene
+    # for obj in meshes:
+    #     print(obj)
+    #     if is_flat(obj):
+    #         print(f"{obj.name} has a flat base.")
+    #     if is_screen_like(obj):
+    #         print(f"{obj.name} is screen like.")
+    #     breakpoint()
+    if not has_materials() or not has_high_quality_pbr_materials(meshes[-1]) or not check_custom_filter(meshes):
+        os.system(f'echo "{object_uid}: no material" >> failed.txt')
         return
+    else:
+        os.system(f'echo "{object_uid}: has material" >> succeed.txt')
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    normalize_scene()
 
     # create an empty object to track
     empty = bpy.data.objects.new("Empty", None)
     scene.collection.objects.link(empty)
     cam_constraint.target = empty
 
-    bpy.context.scene.render.film_transparent = False
-    if args.test_light_dir is None:
-        randomize_lighting()
-        for i in range(args.num_images):
-            # # set the camera position
-            # theta = (i / args.num_images) * math.pi * 2
-            # phi = math.radians(60)
-            # point = (
-            #     args.camera_dist * math.sin(phi) * math.cos(theta),
-            #     args.camera_dist * math.sin(phi) * math.sin(theta),
-            #     args.camera_dist * math.cos(phi),
-            # )
-            # # reset_lighting()
-            # cam.location = point
+    os.makedirs(os.path.join(args.output_dir, object_uid), exist_ok=True)
 
-            # set camera
-            camera = randomize_camera()
+    envir_map_list = glob.glob(os.path.join(args.test_light_dir, "*.hdr"), recursive=True)
+    envir_map_list.sort()
+
+    for i in range(args.num_images):
+        remove_unwanted_objects()
+        # set camera
+        camera = randomize_camera()
+        # render the alpha channel and only save the alpha channel by adding a File output node and plug the Alpha output to it and Render.
+        bpy.context.scene.render.film_transparent = True
+        add_light_env(env=(1, 1, 1, 1), strength=1.0)
+        render_path = os.path.join(args.output_dir, object_uid, f"{i:03d}_alpha.png")
+        scene.render.filepath = render_path
+        bpy.ops.render.render(write_still=True)
+
+        # render objects with different lighting conditions; the rendered images are saved with background
+        bpy.context.scene.render.film_transparent = False
+        for lighting_idx in range(args.lighting_per_view):
+            # randomly select an environment map
+            l_r = random.randint(0, len(envir_map_list) - 1)
+            envmap_path = envir_map_list[l_r]
+            envir_map_name = os.path.basename(envmap_path)
+            add_light_env(env=envmap_path, strength=1.0)
 
             # render the image
-            render_path = os.path.join(args.output_dir, object_uid, f"{i:03d}.png")
+            render_path = os.path.join(
+                args.output_dir,
+                object_uid,
+                f"{i:03d}_{lighting_idx:03d}_{os.path.basename(envir_map_name).split('.')[0]}.png",
+            )
             scene.render.filepath = render_path
             bpy.ops.render.render(write_still=True)
-
             # save camera RT matrix
             RT = get_3x4_RT_matrix_from_blender(camera)
-            RT_path = os.path.join(args.output_dir, object_uid, f"{i:03d}.npy")
+            RT_path = os.path.join(
+                args.output_dir,
+                object_uid,
+                f"{i:03d}_{lighting_idx:03d}_{os.path.basename(envir_map_name).split('.')[0]}.npy",
+            )
             np.save(RT_path, RT)
-    else:
-        # Render relit ground truth
-        for envmap_name in glob.glob(os.path.join(args.test_light_dir, "*.hdr"), recursive=True):
-            envmap_path = envmap_name
-            reset_lighting_2()
-            add_light_env(env=envmap_path, strength=1.0)
-            for i in range(args.num_images):
-                # set camera
-                camera = randomize_camera()
-
-                # render the image
-                render_path = os.path.join(
-                    args.output_dir, object_uid, f"{i:03d}_{basename(envmap_name).split('.')[0]}.png"
-                )
-                scene.render.filepath = render_path
-                bpy.ops.render.render(write_still=True)
-
-                # save camera RT matrix
-                RT = get_3x4_RT_matrix_from_blender(camera)
-                RT_path = os.path.join(
-                    args.output_dir, object_uid, f"{i:03d}_{basename(envmap_name).split('.')[0]}.npy"
-                )
-                np.save(RT_path, RT)
+            # # save_envir_map_name
+            # envir_map_info_path = os.path.join(args.output_dir, object_uid, f'{i:03d}_{lighting_idx:03d}_{os.path.basename(envmap_name).split('.')[0]}.npy')
+            # os.system(f'echo "{envir_map_name}" >> {os.path.join(args.output_dir, object_uid, {i:03d}_{lighting_idx:03d}_{os.path.basename(envmap_name).split('.')[0].npy)}')
 
 
 def download_object(object_url: str) -> str:

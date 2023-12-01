@@ -9,5 +9,5 @@ uids = objaverse.load_uids()
 print(len(uids), type(uids))
 
 
-annotations = objaverse.load_annotations(uids[:10])
-objects = objaverse.load_objects(uids=uids[:10], download_processes=processes)
+annotations = objaverse.load_annotations(uids[:50])
+objects = objaverse.load_objects(uids=uids[:50], download_processes=processes)
